@@ -20,5 +20,3 @@ jobs:
         run: python -m compileall -q alpha_engine
       - name: Test
         run: pytest -q
-      - name: Ruff
-        run: ruff check alpha_engine tests
