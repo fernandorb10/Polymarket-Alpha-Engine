@@ -9,69 +9,116 @@ from .models import CriticReport, Market, ProbabilityReport
 log = logging.getLogger(__name__)
 
 
-def fallback(m: Market):
+def fallback(market: Market):
     return (
-        ProbabilityReport(probability_yes=m.yes_price, confidence=.15, thesis='No independent current evidence', unknowns=['Current evidence unavailable']),
-        CriticReport(risk_score=.9, resolution_ambiguity=.5, strongest_objection='No current independent research', failure_modes=['Market-price anchoring'], recommendation='REJECT'),
+        ProbabilityReport(
+            probability_yes=market.yes_price,
+            confidence=0.15,
+            thesis="No independent current evidence",
+            unknowns=["Current evidence unavailable"],
+        ),
+        CriticReport(
+            risk_score=0.9,
+            resolution_ambiguity=0.5,
+            strongest_objection="No current independent research",
+            failure_modes=["Market-price anchoring"],
+            recommendation="REJECT",
+        ),
     )
 
 
 def _client_and_model():
     provider = settings.ai_provider.strip().lower()
-    if provider == 'gemini':
-        if not settings.gemini_api_key: return None, None
-        return OpenAI(api_key=settings.gemini_api_key, base_url=settings.gemini_base_url), settings.gemini_model
-    if provider == 'openai':
-        if not settings.openai_api_key: return None, None
+    if provider == "gemini":
+        if not settings.gemini_api_key:
+            return None, None
+        return (
+            OpenAI(
+                api_key=settings.gemini_api_key,
+                base_url=settings.gemini_base_url,
+            ),
+            settings.gemini_model,
+        )
+    if provider == "openai":
+        if not settings.openai_api_key:
+            return None, None
         return OpenAI(api_key=settings.openai_api_key), settings.openai_model
-    raise ValueError(f'Unsupported AI_PROVIDER: {settings.ai_provider}')
+    raise ValueError(f"Unsupported AI_PROVIDER: {settings.ai_provider}")
 
 
 def _structured(client, model, prompt, response_model):
     completion = client.beta.chat.completions.parse(
         model=model,
         messages=[
-            {'role': 'system', 'content': 'Return only the requested structured forecast. Use the supplied current evidence, distinguish publication time from event time, cite uncertainty, and remain calibrated.'},
-            {'role': 'user', 'content': prompt},
+            {
+                "role": "system",
+                "content": (
+                    "Return only the requested structured forecast. Use the supplied "
+                    "current evidence, distinguish publication time from event time, "
+                    "cite uncertainty, and remain calibrated."
+                ),
+            },
+            {"role": "user", "content": prompt},
         ],
         response_format=response_model,
     )
     parsed = completion.choices[0].message.parsed
     if parsed is None:
-        raise ValueError('AI provider returned no structured result')
+        raise ValueError("AI provider returned no structured result")
     return parsed
 
 
-def research_market(m: Market):
+def _attach_evidence(probability: ProbabilityReport, items: list[dict[str, str]]) -> None:
+    """Persist exactly what was retrieved in the structured analysis payload."""
+    urls = [item["url"] for item in items if item.get("url")]
+    probability.source_urls = list(dict.fromkeys([*probability.source_urls, *urls]))
+
+    retrieved = [
+        f"WEB: {item['title']} | {item['source']} | {item['published']}"
+        for item in items
+    ]
+    probability.evidence = list(dict.fromkeys([*probability.evidence, *retrieved]))
+
+    if items:
+        query = items[0].get("query")
+        if query:
+            probability.unknowns = list(
+                dict.fromkeys([*probability.unknowns, f"News query used: {query}"])
+            )
+
+
+def research_market(market: Market):
     if not settings.ai_enabled:
-        return fallback(m)
+        return fallback(market)
+
     client, model = _client_and_model()
     if client is None or model is None:
-        return fallback(m)
+        return fallback(market)
 
-    evidence = current_evidence(m.question)
+    evidence = current_evidence(market.question)
     evidence_text = format_evidence(evidence)
     prompt = f"""You are an evidence-first prediction-market analyst. Estimate the probability that YES resolves true. Do not anchor on the market price. Distinguish event probability from resolution-rule risk.
 
-QUESTION: {m.question}
-RULES: {m.rules}
-END: {m.end_date}
-CATEGORY: {m.category}
+QUESTION: {market.question}
+RULES: {market.rules}
+END: {market.end_date}
+CATEGORY: {market.category}
 
 CURRENT WEB EVIDENCE:
 {evidence_text}
 
-Use the current evidence above. Do not invent article contents beyond their titles/source/time. Explicitly list missing facts and lower confidence when evidence is stale, conflicting, speculative, or insufficient. If no current evidence is available, confidence must be below {settings.min_confidence}."""
+Use only the current evidence above plus stable background knowledge. Do not invent article contents beyond their titles, source and publication time. Explicitly list missing facts and lower confidence when evidence is stale, conflicting, speculative, unrelated or insufficient. Calibrate confidence independently; no trading threshold is provided to you."""
     probability = _structured(client, model, prompt, ProbabilityReport)
+    _attach_evidence(probability, evidence)
 
     critic_prompt = f"""Act as an independent adversarial reviewer. Falsify the forecast, inspect resolution ambiguity, and verify whether its claimed edge is supported by current evidence rather than memory.
 
-MARKET: {m.question}
-RULES: {m.rules}
+MARKET: {market.question}
+RULES: {market.rules}
 CURRENT WEB EVIDENCE:
 {evidence_text}
 FORECAST: {probability.model_dump_json()}
 
-REJECT when evidence is stale, weak, unrelated, contradictory, or insufficient for the confidence claimed."""
+REJECT when evidence is stale, weak, unrelated, contradictory, or insufficient for the confidence claimed. Do not infer article contents that are not present in the supplied evidence."""
     critic = _structured(client, model, critic_prompt, CriticReport)
     return probability, critic
