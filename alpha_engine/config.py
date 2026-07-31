@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -106,12 +107,24 @@ class Settings(BaseSettings):
             raise ValueError('MAX_EVENT_EXPOSURE_PCT cannot exceed MAX_CATEGORY_EXPOSURE_PCT')
         if self.diversity_cooldown_minutes > self.analysis_cooldown_minutes:
             raise ValueError('DIVERSITY_COOLDOWN_MINUTES cannot exceed ANALYSIS_COOLDOWN_MINUTES')
-        if self.dashboard_host in {'0.0.0.0', '::'} and not (self.dashboard_username and self.dashboard_password):
-            raise ValueError('Public dashboard binding requires DASHBOARD_USERNAME and DASHBOARD_PASSWORD')
         return self
 
+    def validate_dashboard_security(self, host: str | None = None) -> None:
+        bind_host = host or self.dashboard_host
+        if bind_host in {'0.0.0.0', '::'} and not (
+            self.dashboard_username and self.dashboard_password
+        ):
+            raise ValueError(
+                'Public dashboard binding requires DASHBOARD_USERNAME and DASHBOARD_PASSWORD'
+            )
+
     def ensure_dirs(self) -> None:
-        for path in (Path(self.database_path).parent, Path(self.report_dir), Path(self.backup_dir), Path(self.export_dir)):
+        for path in (
+            Path(self.database_path).parent,
+            Path(self.report_dir),
+            Path(self.backup_dir),
+            Path(self.export_dir),
+        ):
             path.mkdir(parents=True, exist_ok=True)
 
 
