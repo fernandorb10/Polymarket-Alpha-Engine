@@ -46,14 +46,40 @@ def init_db():
 
 def classify_question(question):
     text = question.lower()
-    if any(x in text for x in ('election', 'president', 'nomination', 'senate', 'congress', 'prime minister')):
-        category = 'politics'
-    elif any(x in text for x in ('bitcoin', 'ethereum', 'crypto', 'solana', 'token')):
-        category = 'crypto'
-    elif any(x in text for x in ('nba', 'nfl', 'mlb', 'nhl', 'championship', 'world cup', 'league')):
+    if any(x in text for x in (
+        'ballon d', 'nba', 'nfl', 'mlb', 'nhl', 'championship', 'world cup',
+        'champions league', 'premier league', 'la liga', 'serie a', 'bundesliga',
+        'football', 'soccer', 'basketball', 'baseball', 'hockey', 'tennis', 'ufc',
+        'formula 1', 'super bowl', 'playoffs', 'grand slam',
+    )):
         category = 'sports'
-    elif any(x in text for x in ('fed', 'inflation', 'gdp', 'recession', 'interest rate')):
+    elif any(x in text for x in (
+        'bitcoin', 'ethereum', 'crypto', 'solana', 'dogecoin', 'xrp',
+        'blockchain', 'stablecoin', 'national bitcoin reserve',
+    )):
+        category = 'crypto'
+    elif any(x in text for x in (
+        'fed', 'inflation', 'gdp', 'recession', 'interest rate', 'unemployment',
+        'cpi', 'stock market', 'market cap', 'largest company', 'nasdaq', 's&p',
+    )):
         category = 'economy'
+    elif any(x in text for x in (
+        'election', 'president', 'nomination', 'senate', 'congress',
+        'prime minister', 'parliament', 'governor', 'mayor', 'invade',
+        'military clash', 'regime fall', 'strike countries',
+    )):
+        category = 'politics'
+    elif any(x in text for x in (
+        'openai', 'anthropic', 'artificial intelligence', ' ai ', 'ipo',
+        'apple', 'google', 'alphabet', 'microsoft', 'tesla', 'spacex',
+        'iphone', 'android', 'launch a token',
+    )):
+        category = 'technology'
+    elif any(x in text for x in (
+        'movie', 'film', 'box office', 'top grossing', 'opening weekend',
+        'oscar', 'grammy', 'emmy', 'album', 'tv show', 'streaming',
+    )):
+        category = 'entertainment'
     else:
         category = 'other'
 
@@ -63,6 +89,21 @@ def classify_question(question):
     event_words = sorted(set(words))[:8]
     event_key = category + ':' + '-'.join(event_words + years[:1])
     return category, event_key[:180]
+
+
+def reclassify_positions():
+    updated = 0
+    with connect() as c:
+        rows = c.execute('SELECT id,question,category,event_key FROM positions').fetchall()
+        for row in rows:
+            category, event_key = classify_question(row['question'])
+            if row['category'] != category or row['event_key'] != event_key:
+                c.execute(
+                    'UPDATE positions SET category=?,event_key=? WHERE id=?',
+                    (category, event_key, row['id']),
+                )
+                updated += 1
+    return updated
 
 
 def save_snapshot(m):
