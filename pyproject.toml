@@ -1,7 +1,7 @@
 [project]
 name = "polymarket-alpha-engine"
-version = "0.1.0"
-description = "AI-assisted Polymarket value scanner and paper-trading simulator"
+version = "1.0.0"
+description = "Polymarket market scanner, AI probability engine and paper-trading platform"
 requires-python = ">=3.11"
 dependencies = [
   "httpx>=0.28,<1",
@@ -9,8 +9,10 @@ dependencies = [
   "pydantic-settings>=2.7,<3",
   "typer>=0.15,<1",
   "rich>=13.9,<15",
-  "openai>=1.60,<2",
+  "openai>=1.60,<3",
   "python-dotenv>=1.0,<2",
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
 ]
 
 [project.optional-dependencies]

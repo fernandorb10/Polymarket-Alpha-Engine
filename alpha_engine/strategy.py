@@ -1,39 +1,51 @@
 import math
+from datetime import datetime, timezone
 from .config import settings
-from .models import Market, Opportunity, ResearchReport
+from .models import Market, ProbabilityReport, CriticReport, Opportunity
 
+def hours_left(m: Market) -> float:
+    if not m.end_date: return 999999
+    end=m.end_date if m.end_date.tzinfo else m.end_date.replace(tzinfo=timezone.utc)
+    return (end-datetime.now(timezone.utc)).total_seconds()/3600
 
-def evaluate(m: Market, r: ResearchReport) -> Opportunity:
-    yes_edge = r.probability_yes - m.yes_price
-    no_prob = 1 - r.probability_yes
-    no_edge = no_prob - m.no_price
-    if yes_edge >= no_edge:
-        side, fair, price, gross = "YES", r.probability_yes, m.yes_price, yes_edge
-    else:
-        side, fair, price, gross = "NO", no_prob, m.no_price, no_edge
+def eligible(m: Market) -> bool:
+    return (m.active and not m.closed and m.liquidity>=settings.min_liquidity and m.volume>=settings.min_volume
+      and m.spread<=settings.max_spread and settings.min_price<=m.yes_price<=settings.max_price
+      and hours_left(m)>=settings.min_hours_to_close)
 
-    friction = max(m.spread / 2, 0.005) + 0.005  # spread impact + slippage reserve
-    net = gross - friction
-    liquidity_score = min(1.0, math.log10(max(m.liquidity, 1)) / 6)
-    edge_score = min(1.0, max(0.0, net) / 0.20)
-    score = 100 * (0.50 * edge_score + 0.30 * r.confidence + 0.20 * liquidity_score)
+def rank_market(m: Market) -> float:
+    liq=min(1, math.log10(max(m.liquidity,1))/6)
+    vol=min(1, math.log10(max(m.volume,1))/7)
+    activity=min(1, math.log10(max(m.volume_24h,1))/5)
+    spread=max(0,1-m.spread/max(settings.max_spread,.001))
+    uncertainty=1-abs(m.yes_price-.5)*2
+    m.rank_score=100*(.25*liq+.25*vol+.20*activity+.20*spread+.10*uncertainty)
+    return m.rank_score
 
-    # Quarter-Kelly, hard capped by configuration.
-    b = (1 / price) - 1 if 0 < price < 1 else 0
-    kelly = max(0.0, (b * fair - (1 - fair)) / b) if b > 0 else 0
-    fraction = min(settings.max_position_pct, 0.25 * kelly)
-    stake = round(settings.bankroll_usdc * fraction, 2)
+def kelly_binary(p: float, price: float) -> float:
+    if price<=0 or price>=1: return 0
+    b=(1-price)/price
+    return max(0,(b*p-(1-p))/b)
 
-    valid = (
-        m.liquidity >= settings.min_liquidity_usdc
-        and m.volume >= settings.min_volume_usdc
-        and m.spread <= settings.max_spread
-        and net >= settings.min_edge
-        and r.confidence >= 0.55
-        and stake >= 1
-    )
-    return Opportunity(
-        market=m, report=r, fair_probability=fair, market_probability=price,
-        gross_edge=gross, net_edge=net, side=side, score=score,
-        stake_usdc=stake if valid else 0.0, decision="PAPER_BUY" if valid else "SKIP"
-    )
+def build_opportunity(m: Market, p: ProbabilityReport, c: CriticReport, current_exposure: float) -> Opportunity:
+    side="YES" if p.probability_yes>=m.yes_price else "NO"
+    fair=p.probability_yes if side=="YES" else 1-p.probability_yes
+    market=m.best_ask_yes if side=="YES" and m.best_ask_yes else (m.no_price if side=="NO" else m.yes_price)
+    gross=fair-market
+    costs=m.spread/2+settings.slippage_buffer
+    net=gross-costs
+    k=kelly_binary(fair,market)*settings.kelly_fraction
+    max_stake=settings.bankroll_usdc*settings.max_position_pct
+    exposure_room=max(0,settings.bankroll_usdc*settings.max_total_exposure_pct-current_exposure)
+    stake=min(settings.bankroll_usdc*k,max_stake,exposure_room)
+    ev=(fair*(1-market)-(1-fair)*market)/market if market>0 else -1
+    decision="OPEN"; reason="edge and risk thresholds passed"
+    if net<settings.min_net_edge or p.confidence<settings.min_confidence or c.risk_score>settings.max_critic_risk or c.recommendation=="REJECT" or stake<1:
+        decision="REJECT"; reason="threshold or portfolio constraint failed"
+    elif c.recommendation=="REDUCE":
+        stake*=.5; decision="WATCH"; reason="critic requested reduced conviction"
+    score=100*max(0,net)*p.confidence*(1-c.risk_score)
+    return Opportunity(market=m,side=side,fair_probability=fair,market_probability=market,gross_edge=gross,
+      net_edge=net,expected_value_per_dollar=ev,confidence=p.confidence,critic_risk=c.risk_score,
+      kelly_fraction=k,stake_usdc=round(stake,2),score=score,decision=decision,reason=reason,
+      probability_report=p,critic_report=c)

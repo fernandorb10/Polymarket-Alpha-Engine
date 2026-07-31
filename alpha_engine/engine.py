@@ -1,36 +1,30 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from .config import settings
-from .db import init_db, save_snapshot, save_analysis, open_position
+import logging
 from .polymarket import PolymarketClient
+from .strategy import eligible, rank_market, build_opportunity
 from .research import research_market
-from .strategy import evaluate
+from . import db
+from .config import settings
+log=logging.getLogger(__name__)
 
-
-def scan(limit: int = 250, analyze: int = 10, execute: bool = False):
-    init_db()
-    markets = PolymarketClient().fetch_markets(limit)
-    eligible = []
-    for m in markets:
-        save_snapshot(m)
-        if (m.liquidity >= settings.min_liquidity_usdc and
-            m.volume >= settings.min_volume_usdc and
-            m.spread <= settings.max_spread and
-            0.04 <= m.yes_price <= 0.96):
-            eligible.append(m)
-    # Prioritize liquidity and uncertainty; extreme prices are often poor LLM tasks.
-    eligible.sort(key=lambda m: (m.liquidity * m.volume) ** 0.5 * (1 - abs(m.yes_price - .5)), reverse=True)
-    targets = eligible[:analyze]
-    opportunities = []
-    with ThreadPoolExecutor(max_workers=min(4, max(1, len(targets)))) as pool:
-        jobs = {pool.submit(research_market, m): m for m in targets}
-        for job in as_completed(jobs):
-            m = jobs[job]
-            try:
-                o = evaluate(m, job.result())
-                save_analysis(o)
-                if execute and o.decision == "PAPER_BUY":
-                    open_position(o)
-                opportunities.append(o)
-            except Exception as exc:
-                print(f"AVISO análisis fallido para {m.question[:60]}: {exc}")
-    return sorted(opportunities, key=lambda o: o.score, reverse=True)
+def run_cycle(scan_only=False):
+    db.init_db(); cid=db.start_cycle(); client=PolymarketClient(); seen=analysed=opened=0
+    try:
+      markets=client.list_active_markets(); seen=len(markets)
+      candidates=[m for m in markets if m.liquidity>=settings.min_liquidity and m.volume>=settings.min_volume]
+      client.enrich_books(candidates)
+      for m in markets: rank_market(m); db.save_snapshot(m)
+      db.mark_positions(markets)
+      ranked=sorted((m for m in markets if eligible(m)),key=lambda m:m.rank_score,reverse=True)
+      opportunities=[]
+      if not scan_only:
+        for m in ranked[:min(settings.analysis_top_n,settings.max_ai_calls_per_cycle)]:
+          try:
+            p,c=research_market(m); o=build_opportunity(m,p,c,db.exposure()); db.save_analysis(o); analysed+=1
+            if db.open_position(o): opened+=1
+            opportunities.append(o)
+          except Exception: log.exception('analysis failed for %s',m.id)
+      db.finish_cycle(cid,seen,len(ranked),analysed,opened)
+      return {'seen':seen,'eligible':len(ranked),'analysed':analysed,'opened':opened,'top':ranked[:20],'opportunities':opportunities}
+    except Exception as e:
+      db.finish_cycle(cid,seen,0,analysed,opened,str(e)); raise
+    finally: client.close()

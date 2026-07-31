@@ -1,21 +1,39 @@
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
-
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
     openai_api_key: str | None = None
     openai_model: str = "gpt-5-mini"
-    database_path: str = "data/alpha_engine.db"
-    bankroll_usdc: float = 1000.0
-    min_liquidity_usdc: float = 10_000.0
-    min_volume_usdc: float = 5_000.0
-    min_edge: float = 0.08
-    max_spread: float = 0.04
-    max_position_pct: float = 0.02
     ai_enabled: bool = True
+    database_path: str = "./data/alpha_engine.db"
+    report_dir: str = "./reports"
+    log_level: str = "INFO"
     gamma_url: str = "https://gamma-api.polymarket.com"
     clob_url: str = "https://clob.polymarket.com"
+    http_timeout: float = 30
+    scan_limit: int = 1000
+    analysis_top_n: int = 12
+    min_liquidity: float = 5000
+    min_volume: float = 10000
+    max_spread: float = 0.08
+    min_price: float = 0.05
+    max_price: float = 0.95
+    min_hours_to_close: float = 6
+    min_net_edge: float = 0.06
+    min_confidence: float = 0.55
+    max_critic_risk: float = 0.65
+    bankroll_usdc: float = 1000
+    kelly_fraction: float = 0.25
+    max_position_pct: float = 0.05
+    max_total_exposure_pct: float = 0.35
+    slippage_buffer: float = 0.01
+    max_ai_calls_per_cycle: int = 12
+    dashboard_host: str = "0.0.0.0"
+    dashboard_port: int = 8080
 
+    def ensure_dirs(self) -> None:
+        Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.report_dir).mkdir(parents=True, exist_ok=True)
 
 settings = Settings()
