@@ -422,7 +422,7 @@ def max_allowed_stake(question: str, raw_category: str = "") -> tuple[float, str
         ),
     }
     limiting_reason, room = min(rooms.items(), key=lambda item: item[1])
-    return max(0.0, room), limiting_reason if room <= 0 else None
+    return max(0.0, room), limiting_reason
 
 
 def portfolio_allows(
