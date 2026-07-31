@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     scan_page_size: int = Field(default=100, ge=10, le=100)
     analysis_top_n: int = 12
     analysis_cooldown_minutes: int = 180
+    diversity_cooldown_minutes: int = Field(default=30, ge=0)
     diversify_analysis: bool = True
     analysis_categories: str = 'sports,crypto,economy,politics,technology,entertainment,other'
     max_analysis_per_category: int = Field(default=2, ge=1)
@@ -97,6 +98,8 @@ class Settings(BaseSettings):
             raise ValueError('MAX_POSITION_PCT cannot exceed MAX_TOTAL_EXPOSURE_PCT')
         if self.max_event_exposure_pct > self.max_category_exposure_pct:
             raise ValueError('MAX_EVENT_EXPOSURE_PCT cannot exceed MAX_CATEGORY_EXPOSURE_PCT')
+        if self.diversity_cooldown_minutes > self.analysis_cooldown_minutes:
+            raise ValueError('DIVERSITY_COOLDOWN_MINUTES cannot exceed ANALYSIS_COOLDOWN_MINUTES')
         return self
 
     def ensure_dirs(self) -> None:
