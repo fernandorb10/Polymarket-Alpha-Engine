@@ -8,6 +8,32 @@ from .config import settings
 log = logging.getLogger(__name__)
 
 
+def _select_markets_for_analysis(ranked, limit):
+    open_ids = db.open_market_ids()
+    recent_ids = db.recently_analyzed_market_ids(settings.analysis_cooldown_minutes)
+    selected = []
+    selected_ids = set()
+
+    # Open positions are always re-analysed first so exit decisions remain current.
+    for market in ranked:
+        if market.id in open_ids and market.id not in selected_ids:
+            selected.append(market)
+            selected_ids.add(market.id)
+            if len(selected) >= limit:
+                return selected
+
+    # New candidates respect the cooldown to avoid wasting the free Gemini quota.
+    for market in ranked:
+        if market.id in selected_ids or market.id in recent_ids:
+            continue
+        selected.append(market)
+        selected_ids.add(market.id)
+        if len(selected) >= limit:
+            break
+
+    return selected
+
+
 def run_cycle(scan_only=False):
     db.init_db()
     cid = db.start_cycle()
@@ -31,7 +57,9 @@ def run_cycle(scan_only=False):
 
         if not scan_only:
             market_limit = min(settings.analysis_top_n, max(1, settings.max_ai_calls_per_cycle // 2))
-            for market in ranked[:market_limit]:
+            selected = _select_markets_for_analysis(ranked, market_limit)
+
+            for market in selected:
                 try:
                     probability, critic = research_market(market)
                     opportunity = build_opportunity(market, probability, critic, db.exposure())
