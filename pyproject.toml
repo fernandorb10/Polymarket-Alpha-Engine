@@ -36,6 +36,7 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E4", "E9", "F"]
+ignore = ["F401"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
