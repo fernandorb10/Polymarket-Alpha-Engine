@@ -1,6 +1,6 @@
 import sqlite3
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from .config import settings
 
 
@@ -22,6 +22,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS snapshots(id INTEGER PRIMARY KEY, market_id TEXT,captured_at TEXT,question TEXT,yes_price REAL,no_price REAL,bid REAL,ask REAL,spread REAL,liquidity REAL,volume REAL,volume_24h REAL,rank_score REAL,raw_json TEXT);
         CREATE INDEX IF NOT EXISTS ix_snap_market_time ON snapshots(market_id,captured_at);
         CREATE TABLE IF NOT EXISTS analyses(id INTEGER PRIMARY KEY,market_id TEXT,created_at TEXT,side TEXT,fair_probability REAL,market_probability REAL,gross_edge REAL,net_edge REAL,confidence REAL,critic_risk REAL,score REAL,stake_usdc REAL,decision TEXT,payload_json TEXT);
+        CREATE INDEX IF NOT EXISTS ix_analysis_market_time ON analyses(market_id,created_at);
         CREATE TABLE IF NOT EXISTS positions(id INTEGER PRIMARY KEY,market_id TEXT,token_id TEXT,question TEXT,side TEXT,entry_price REAL,shares REAL,stake_usdc REAL,opened_at TEXT,status TEXT DEFAULT 'OPEN',last_price REAL,last_marked_at TEXT,exit_price REAL,closed_at TEXT,pnl_usdc REAL,resolution TEXT,UNIQUE(market_id,status));
         CREATE TABLE IF NOT EXISTS cycles(id INTEGER PRIMARY KEY,started_at TEXT,finished_at TEXT,markets_seen INTEGER,eligible INTEGER,analysed INTEGER,opened INTEGER,error TEXT);
         """)
@@ -46,6 +47,17 @@ def save_analysis(o):
 def exposure():
     with connect() as c:
         return float(c.execute("SELECT COALESCE(SUM(stake_usdc),0) v FROM positions WHERE status='OPEN'").fetchone()['v'])
+
+
+def open_market_ids():
+    with connect() as c:
+        return {str(r['market_id']) for r in c.execute("SELECT market_id FROM positions WHERE status='OPEN'")}
+
+
+def recently_analyzed_market_ids(minutes):
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    with connect() as c:
+        return {str(r['market_id']) for r in c.execute("SELECT DISTINCT market_id FROM analyses WHERE created_at>=?", (cutoff,))}
 
 
 def open_position(o):
@@ -142,13 +154,39 @@ def list_positions(open_only=False):
 def summary():
     with connect() as c:
         r = c.execute("SELECT COUNT(*) n,COALESCE(SUM(stake_usdc),0) stake,COALESCE(SUM(shares*COALESCE(last_price,entry_price)-stake_usdc),0) upnl FROM positions WHERE status='OPEN'").fetchone()
-        x = c.execute("SELECT COUNT(*) n,COALESCE(SUM(pnl_usdc),0) pnl FROM positions WHERE status='CLOSED'").fetchone()
-        return {'open_positions': r['n'], 'open_stake': r['stake'], 'unrealized_pnl': r['upnl'], 'closed_positions': x['n'], 'realized_pnl': x['pnl']}
+        x = c.execute("SELECT COUNT(*) n,COALESCE(SUM(pnl_usdc),0) pnl,COALESCE(SUM(CASE WHEN pnl_usdc>0 THEN 1 ELSE 0 END),0) wins,COALESCE(SUM(CASE WHEN pnl_usdc<0 THEN 1 ELSE 0 END),0) losses FROM positions WHERE status='CLOSED'").fetchone()
+        total_pnl = float(r['upnl']) + float(x['pnl'])
+        equity = settings.bankroll_usdc + total_pnl
+        closed_count = int(x['n'])
+        return {
+            'open_positions': int(r['n']),
+            'open_stake': float(r['stake']),
+            'exposure_pct': float(r['stake']) / settings.bankroll_usdc if settings.bankroll_usdc else 0,
+            'unrealized_pnl': float(r['upnl']),
+            'closed_positions': closed_count,
+            'realized_pnl': float(x['pnl']),
+            'total_pnl': total_pnl,
+            'equity': equity,
+            'return_pct': total_pnl / settings.bankroll_usdc if settings.bankroll_usdc else 0,
+            'wins': int(x['wins']),
+            'losses': int(x['losses']),
+            'win_rate': int(x['wins']) / closed_count if closed_count else 0,
+        }
 
 
 def recent_analyses(limit=50):
     with connect() as c:
         return [dict(r) for r in c.execute('SELECT * FROM analyses ORDER BY created_at DESC LIMIT ?', (limit,))]
+
+
+def recent_cycles(limit=20):
+    with connect() as c:
+        return [dict(r) for r in c.execute('SELECT * FROM cycles ORDER BY id DESC LIMIT ?', (limit,))]
+
+
+def latest_cycle():
+    cycles = recent_cycles(1)
+    return cycles[0] if cycles else None
 
 
 def start_cycle():
