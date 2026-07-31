@@ -167,10 +167,16 @@ def drawdown_pause_reason() -> str | None:
 
 
 def openings_today() -> int:
+    """Count only positions opened by the active paper campaign today.
+
+    Legacy positions created before campaign tagging must not consume the current
+    campaign's daily opening allowance.
+    """
     start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     with connect() as conn:
         return int(conn.execute(
-            "SELECT COUNT(*) n FROM positions WHERE opened_at>=?", (start,)
+            "SELECT COUNT(*) n FROM positions WHERE opened_at>=? AND campaign_id=?",
+            (start, settings.campaign_id),
         ).fetchone()['n'])
 
 
