@@ -1,15 +1,14 @@
 import json
-from pathlib import Path
 
 import typer
 import uvicorn
 from rich.console import Console
 from rich.table import Table
 
-from .config import settings
-from .logging_setup import configure_logging
-from .engine import run_cycle
 from . import analytics, db, ops
+from .config import settings
+from .engine import run_cycle
+from .logging_setup import configure_logging
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -31,8 +30,13 @@ def cycle(scan_only: bool = typer.Option(False, '--scan-only')):
     console.print({k: v for k, v in result.items() if k not in ('top', 'opportunities')})
     table = Table('Score', 'Price', 'Spread', 'Liquidity', 'Question')
     for market in result['top'][:15]:
-        table.add_row(f'{market.rank_score:.1f}', f'{market.yes_price:.3f}',
-                      f'{market.spread:.3f}', f'{market.liquidity:.0f}', market.question[:80])
+        table.add_row(
+            f'{market.rank_score:.1f}',
+            f'{market.yes_price:.3f}',
+            f'{market.spread:.3f}',
+            f'{market.liquidity:.0f}',
+            market.question[:80],
+        )
     console.print(table)
 
 
@@ -43,16 +47,24 @@ def status():
 
 @app.command()
 def positions(open_only: bool = False):
-    table = Table('ID', 'Status', 'Version', 'Side', 'Entry', 'Mark', 'Stake', 'PnL', 'MFE', 'MAE', 'Question')
+    table = Table(
+        'ID', 'Status', 'Version', 'Side', 'Entry', 'Mark', 'Stake',
+        'PnL', 'MFE', 'MAE', 'Question',
+    )
     for position in db.list_positions(open_only):
         pnl = position['unrealized_pnl'] if position['status'] == 'OPEN' else position['pnl_usdc']
         table.add_row(
-            str(position['id']), position['status'], position.get('strategy_version') or 'legacy',
-            position['side'], f"{position['entry_price']:.4f}",
+            str(position['id']),
+            position['status'],
+            position.get('strategy_version') or 'legacy',
+            position['side'],
+            f"{position['entry_price']:.4f}",
             f"{(position['last_price'] or position['entry_price']):.4f}",
-            f"{position['stake_usdc']:.2f}", f"{float(pnl or 0):.2f}",
+            f"{position['stake_usdc']:.2f}",
+            f"{float(pnl or 0):.2f}",
             f"{float(position.get('mfe_pct') or 0):.1%}",
-            f"{float(position.get('mae_pct') or 0):.1%}", position['question'][:65],
+            f"{float(position.get('mae_pct') or 0):.1%}",
+            position['question'][:65],
         )
     console.print(table)
 
@@ -95,20 +107,36 @@ def ledger(limit: int = typer.Option(30, '--limit', min=1, max=500)):
     ops.prepare()
     with ops.connect() as conn:
         rows = conn.execute(
-            'SELECT created_at,action,reason,market_id,position_id,strategy_version FROM decision_ledger ORDER BY id DESC LIMIT ?',
+            'SELECT created_at,action,reason,market_id,position_id,strategy_version '
+            'FROM decision_ledger ORDER BY id DESC LIMIT ?',
             (limit,),
         ).fetchall()
     table = Table('Time', 'Action', 'Reason', 'Market', 'Position', 'Version')
     for row in rows:
-        table.add_row(row['created_at'][:19], row['action'], (row['reason'] or '')[:55],
-                      row['market_id'] or '-', str(row['position_id'] or '-'), row['strategy_version'] or '-')
+        table.add_row(
+            row['created_at'][:19],
+            row['action'],
+            (row['reason'] or '')[:55],
+            row['market_id'] or '-',
+            str(row['position_id'] or '-'),
+            row['strategy_version'] or '-',
+        )
     console.print(table)
 
 
 @app.command()
 def serve(host: str | None = None, port: int | None = None):
-    uvicorn.run('alpha_engine.dashboard:app', host=host or settings.dashboard_host,
-                port=port or settings.dashboard_port)
+    bind_host = host or settings.dashboard_host
+    try:
+        settings.validate_dashboard_security(bind_host)
+    except ValueError as exc:
+        console.print(f'[red]{exc}[/red]')
+        raise typer.Exit(code=2) from exc
+    uvicorn.run(
+        'alpha_engine.dashboard:app',
+        host=bind_host,
+        port=port or settings.dashboard_port,
+    )
 
 
 if __name__ == '__main__':
