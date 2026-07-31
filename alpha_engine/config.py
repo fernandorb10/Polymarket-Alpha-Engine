@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     http_timeout: float = 30
     scan_limit: int = 1000
     analysis_top_n: int = 12
+    analysis_cooldown_minutes: int = 180
     min_liquidity: float = 5000
     min_volume: float = 10000
     max_spread: float = 0.08
@@ -46,6 +47,8 @@ class Settings(BaseSettings):
 
     dashboard_host: str = "0.0.0.0"
     dashboard_port: int = 8080
+    dashboard_refresh_seconds: int = 30
+    stale_cycle_minutes: int = 30
 
     def ensure_dirs(self) -> None:
         Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
