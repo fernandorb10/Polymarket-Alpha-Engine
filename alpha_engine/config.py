@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5-mini"
 
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_model: str = "gemini-3.5-flash-lite"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
     database_path: str = "./data/alpha_engine.db"
