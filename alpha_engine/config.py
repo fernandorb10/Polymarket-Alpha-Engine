@@ -22,9 +22,13 @@ class Settings(BaseSettings):
     gamma_url: str = 'https://gamma-api.polymarket.com'
     clob_url: str = 'https://clob.polymarket.com'
     http_timeout: float = 30
-    scan_limit: int = 1000
+    scan_limit: int = Field(default=1000, ge=100)
+    scan_page_size: int = Field(default=100, ge=10, le=100)
     analysis_top_n: int = 12
     analysis_cooldown_minutes: int = 180
+    diversify_analysis: bool = True
+    analysis_categories: str = 'sports,crypto,economy,politics,technology,entertainment,other'
+    max_analysis_per_category: int = Field(default=2, ge=1)
 
     min_liquidity: float = 5000
     min_volume: float = 10000
@@ -80,6 +84,10 @@ class Settings(BaseSettings):
     stale_cycle_minutes: int = 30
     dashboard_username: str | None = None
     dashboard_password: str | None = None
+
+    @property
+    def analysis_category_list(self) -> list[str]:
+        return [item.strip().lower() for item in self.analysis_categories.split(',') if item.strip()]
 
     @model_validator(mode='after')
     def validate_limits(self):
