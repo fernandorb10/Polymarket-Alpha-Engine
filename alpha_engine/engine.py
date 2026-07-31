@@ -11,6 +11,17 @@ from .market_selection import category_counts, market_category, select_balanced
 log = logging.getLogger(__name__)
 
 
+def _pending_confirmation_ids() -> set[str]:
+    with ops.connect() as conn:
+        return {
+            str(row['market_id'])
+            for row in conn.execute(
+                'SELECT market_id FROM entry_confirmations WHERE confirmations<?',
+                (settings.entry_confirmation_cycles,),
+            )
+        }
+
+
 def _select_markets_for_analysis(ranked, limit):
     return select_balanced(
         ranked,
@@ -18,6 +29,7 @@ def _select_markets_for_analysis(ranked, limit):
         db.open_market_ids(),
         db.recently_analyzed_market_ids(settings.analysis_cooldown_minutes),
         db.recently_analyzed_market_ids(settings.diversity_cooldown_minutes),
+        _pending_confirmation_ids(),
     )
 
 
@@ -79,6 +91,7 @@ def run_cycle(scan_only=False):
                     'category': market_category(market),
                     'score': market.rank_score,
                     'question': market.question,
+                    'pending_confirmation': str(market.id) in _pending_confirmation_ids(),
                 }
                 for market in selected
             ]
@@ -169,6 +182,11 @@ def run_cycle(scan_only=False):
                         },
                     )
                     continue
+
+                # A pending confirmation must be cleared when the fresh analysis no longer
+                # supports opening, otherwise stale 1/2 candidates remain indefinitely.
+                if opportunity.decision != 'OPEN':
+                    ops.clear_entry_confirmation(market_id)
 
                 allowed, reason, confirmation_count = ops.can_open(opportunity)
                 if not allowed:
