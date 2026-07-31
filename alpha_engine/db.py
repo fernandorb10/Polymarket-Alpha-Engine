@@ -1,3 +1,4 @@
+import re
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,13 @@ def connect():
     return c
 
 
+def _add_column(c, table, definition):
+    name = definition.split()[0]
+    columns = {r['name'] for r in c.execute(f'PRAGMA table_info({table})')}
+    if name not in columns:
+        c.execute(f'ALTER TABLE {table} ADD COLUMN {definition}')
+
+
 def init_db():
     with connect() as c:
         c.executescript("""
@@ -26,6 +34,35 @@ def init_db():
         CREATE TABLE IF NOT EXISTS positions(id INTEGER PRIMARY KEY,market_id TEXT,token_id TEXT,question TEXT,side TEXT,entry_price REAL,shares REAL,stake_usdc REAL,opened_at TEXT,status TEXT DEFAULT 'OPEN',last_price REAL,last_marked_at TEXT,exit_price REAL,closed_at TEXT,pnl_usdc REAL,resolution TEXT,UNIQUE(market_id,status));
         CREATE TABLE IF NOT EXISTS cycles(id INTEGER PRIMARY KEY,started_at TEXT,finished_at TEXT,markets_seen INTEGER,eligible INTEGER,analysed INTEGER,opened INTEGER,error TEXT);
         """)
+        _add_column(c, 'positions', 'category TEXT')
+        _add_column(c, 'positions', 'event_key TEXT')
+        _add_column(c, 'positions', 'peak_price REAL')
+        _add_column(c, 'positions', 'edge_gone_count INTEGER DEFAULT 0')
+        _add_column(c, 'positions', 'entry_fee_usdc REAL DEFAULT 0')
+        _add_column(c, 'positions', 'exit_fee_usdc REAL DEFAULT 0')
+        c.execute("CREATE INDEX IF NOT EXISTS ix_positions_status_event ON positions(status,event_key)")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_positions_status_category ON positions(status,category)")
+
+
+def classify_question(question):
+    text = question.lower()
+    if any(x in text for x in ('election', 'president', 'nomination', 'senate', 'congress', 'prime minister')):
+        category = 'politics'
+    elif any(x in text for x in ('bitcoin', 'ethereum', 'crypto', 'solana', 'token')):
+        category = 'crypto'
+    elif any(x in text for x in ('nba', 'nfl', 'mlb', 'nhl', 'championship', 'world cup', 'league')):
+        category = 'sports'
+    elif any(x in text for x in ('fed', 'inflation', 'gdp', 'recession', 'interest rate')):
+        category = 'economy'
+    else:
+        category = 'other'
+
+    normalized = re.sub(r'\b(will|does|do|is|are|the|a|an|win|be|by|on|in|of|to|as)\b', ' ', text)
+    years = re.findall(r'20\d{2}', text)
+    words = [w for w in re.findall(r'[a-z0-9]+', normalized) if len(w) > 2 and not w.isdigit()]
+    event_words = sorted(set(words))[:8]
+    event_key = category + ':' + '-'.join(event_words + years[:1])
+    return category, event_key[:180]
 
 
 def save_snapshot(m):
@@ -60,15 +97,46 @@ def recently_analyzed_market_ids(minutes):
         return {str(r['market_id']) for r in c.execute("SELECT DISTINCT market_id FROM analyses WHERE created_at>=?", (cutoff,))}
 
 
+def portfolio_allows(question, stake):
+    category, event_key = classify_question(question)
+    with connect() as c:
+        category_stake = float(c.execute("SELECT COALESCE(SUM(stake_usdc),0) v FROM positions WHERE status='OPEN' AND category=?", (category,)).fetchone()['v'])
+        event_stake = float(c.execute("SELECT COALESCE(SUM(stake_usdc),0) v FROM positions WHERE status='OPEN' AND event_key=?", (event_key,)).fetchone()['v'])
+        related = int(c.execute("SELECT COUNT(*) n FROM positions WHERE status='OPEN' AND event_key=?", (event_key,)).fetchone()['n'])
+    if category_stake + stake > settings.bankroll_usdc * settings.max_category_exposure_pct:
+        return False, 'CATEGORY_LIMIT'
+    if event_stake + stake > settings.bankroll_usdc * settings.max_event_exposure_pct:
+        return False, 'EVENT_LIMIT'
+    if related >= settings.max_related_positions:
+        return False, 'RELATED_LIMIT'
+    return True, None
+
+
+def _buy_price(price):
+    return min(0.999, max(0.001, price * (1 + settings.paper_execution_slippage_pct)))
+
+
+def _sell_price(price):
+    return min(0.999, max(0.001, price * (1 - settings.paper_execution_slippage_pct)))
+
+
 def open_position(o):
     if o.decision != 'OPEN':
         return False
+    allowed, _ = portfolio_allows(o.market.question, o.stake_usdc)
+    if not allowed:
+        return False
     token = o.market.yes_token_id if o.side == 'YES' else o.market.no_token_id
+    category, event_key = classify_question(o.market.question)
+    entry_price = _buy_price(o.market_probability)
+    fee = o.stake_usdc * settings.paper_fee_pct
+    investable = max(0, o.stake_usdc - fee)
+    shares = investable / entry_price if entry_price else 0
     try:
         with connect() as c:
             c.execute(
-                "INSERT INTO positions(market_id,token_id,question,side,entry_price,shares,stake_usdc,opened_at,last_price,last_marked_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (o.market.id, token, o.market.question, o.side, o.market_probability, o.stake_usdc / o.market_probability, o.stake_usdc, now(), o.market_probability, now()),
+                "INSERT INTO positions(market_id,token_id,question,side,entry_price,shares,stake_usdc,opened_at,last_price,last_marked_at,category,event_key,peak_price,edge_gone_count,entry_fee_usdc) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (o.market.id, token, o.market.question, o.side, entry_price, shares, o.stake_usdc, now(), o.market_probability, now(), category, event_key, o.market_probability, 0, fee),
             )
         return True
     except sqlite3.IntegrityError:
@@ -84,22 +152,26 @@ def mark_positions(markets):
             if not m:
                 continue
             price = m.yes_price if p['side'] == 'YES' else m.no_price
-            c.execute('UPDATE positions SET last_price=?,last_marked_at=? WHERE id=?', (price, now(), p['id']))
+            peak = max(float(p['peak_price'] or p['entry_price']), price)
+            c.execute('UPDATE positions SET last_price=?,last_marked_at=?,peak_price=? WHERE id=?', (price, now(), peak, p['id']))
             n += 1
     return n
 
 
-def close_position(position_id, exit_price, reason):
+def close_position(position_id, market_price, reason):
     with connect() as c:
         p = c.execute("SELECT * FROM positions WHERE id=? AND status='OPEN'", (position_id,)).fetchone()
         if not p:
             return False
-        pnl = p['shares'] * exit_price - p['stake_usdc']
+        exit_price = _sell_price(market_price)
+        gross_value = p['shares'] * exit_price
+        exit_fee = gross_value * settings.paper_fee_pct
+        pnl = gross_value - exit_fee - p['stake_usdc']
         c.execute(
-            "UPDATE positions SET status='CLOSED',exit_price=?,closed_at=?,pnl_usdc=?,resolution=?,last_price=?,last_marked_at=? WHERE id=?",
-            (exit_price, now(), pnl, reason, exit_price, now(), position_id),
+            "UPDATE positions SET status='CLOSED',exit_price=?,closed_at=?,pnl_usdc=?,resolution=?,last_price=?,last_marked_at=?,exit_fee_usdc=? WHERE id=?",
+            (exit_price, now(), pnl, reason, market_price, now(), exit_fee, position_id),
         )
-        return True
+        return {'exit_price': exit_price, 'pnl_usdc': pnl}
 
 
 def manage_exits(markets, opportunities):
@@ -107,7 +179,6 @@ def manage_exits(markets, opportunities):
     opportunity_by_id = {o.market.id: o for o in opportunities}
     closed = []
     current = datetime.now(timezone.utc)
-
     with connect() as c:
         positions = [dict(r) for r in c.execute("SELECT * FROM positions WHERE status='OPEN'").fetchall()]
 
@@ -116,29 +187,43 @@ def manage_exits(markets, opportunities):
         if not market:
             continue
         price = market.yes_price if p['side'] == 'YES' else market.no_price
-        pnl_pct = (p['shares'] * price - p['stake_usdc']) / p['stake_usdc'] if p['stake_usdc'] else 0
+        exit_estimate = _sell_price(price)
+        exit_fee = p['shares'] * exit_estimate * settings.paper_fee_pct
+        pnl = p['shares'] * exit_estimate - exit_fee - p['stake_usdc']
+        pnl_pct = pnl / p['stake_usdc'] if p['stake_usdc'] else 0
+        peak = max(float(p.get('peak_price') or p['entry_price']), price)
+        trailing_drawdown = (peak - price) / peak if peak else 0
         reason = None
 
         if pnl_pct >= settings.take_profit_pct:
             reason = 'TAKE_PROFIT'
         elif pnl_pct <= -settings.stop_loss_pct:
             reason = 'STOP_LOSS'
+        elif peak >= p['entry_price'] * (1 + settings.trailing_activation_pct) and trailing_drawdown >= settings.trailing_stop_pct:
+            reason = 'TRAILING_STOP'
+        elif (current - datetime.fromisoformat(p['opened_at'].replace('Z', '+00:00'))).days >= settings.max_position_age_days:
+            reason = 'MAX_AGE'
         elif market.end_date is not None:
-            end = market.end_date
-            if end.tzinfo is None:
-                end = end.replace(tzinfo=timezone.utc)
-            hours_left = (end - current).total_seconds() / 3600
-            if hours_left <= settings.exit_hours_to_resolution:
+            end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
+            if (end - current).total_seconds() / 3600 <= settings.exit_hours_to_resolution:
                 reason = 'NEAR_RESOLUTION'
 
         opportunity = opportunity_by_id.get(p['market_id'])
-        if reason is None and opportunity is not None:
-            if opportunity.side != p['side'] or opportunity.net_edge < settings.exit_min_edge or opportunity.decision == 'REJECT':
-                reason = 'EDGE_GONE'
+        edge_bad = opportunity is not None and (opportunity.side != p['side'] or opportunity.net_edge < settings.exit_min_edge or opportunity.decision == 'REJECT')
+        edge_count = int(p.get('edge_gone_count') or 0)
+        if edge_bad:
+            edge_count += 1
+        elif opportunity is not None:
+            edge_count = 0
+        with connect() as c:
+            c.execute('UPDATE positions SET edge_gone_count=? WHERE id=?', (edge_count, p['id']))
+        if reason is None and edge_count >= settings.exit_confirmation_cycles:
+            reason = 'EDGE_GONE_CONFIRMED'
 
-        if reason and close_position(p['id'], price, reason):
-            closed.append({'id': p['id'], 'reason': reason, 'pnl_pct': pnl_pct, 'exit_price': price})
-
+        if reason:
+            result = close_position(p['id'], price, reason)
+            if result:
+                closed.append({'id': p['id'], 'question': p['question'], 'reason': reason, 'pnl_pct': pnl_pct, **result})
     return closed
 
 
@@ -154,24 +239,26 @@ def list_positions(open_only=False):
 def summary():
     with connect() as c:
         r = c.execute("SELECT COUNT(*) n,COALESCE(SUM(stake_usdc),0) stake,COALESCE(SUM(shares*COALESCE(last_price,entry_price)-stake_usdc),0) upnl FROM positions WHERE status='OPEN'").fetchone()
-        x = c.execute("SELECT COUNT(*) n,COALESCE(SUM(pnl_usdc),0) pnl,COALESCE(SUM(CASE WHEN pnl_usdc>0 THEN 1 ELSE 0 END),0) wins,COALESCE(SUM(CASE WHEN pnl_usdc<0 THEN 1 ELSE 0 END),0) losses FROM positions WHERE status='CLOSED'").fetchone()
+        x = c.execute("SELECT COUNT(*) n,COALESCE(SUM(pnl_usdc),0) pnl,COALESCE(SUM(CASE WHEN pnl_usdc>0 THEN 1 ELSE 0 END),0) wins,COALESCE(SUM(CASE WHEN pnl_usdc<0 THEN 1 ELSE 0 END),0) losses,COALESCE(SUM(CASE WHEN pnl_usdc>0 THEN pnl_usdc ELSE 0 END),0) gross_profit,ABS(COALESCE(SUM(CASE WHEN pnl_usdc<0 THEN pnl_usdc ELSE 0 END),0)) gross_loss FROM positions WHERE status='CLOSED'").fetchone()
         total_pnl = float(r['upnl']) + float(x['pnl'])
-        equity = settings.bankroll_usdc + total_pnl
         closed_count = int(x['n'])
+        gross_loss = float(x['gross_loss'])
         return {
-            'open_positions': int(r['n']),
-            'open_stake': float(r['stake']),
+            'open_positions': int(r['n']), 'open_stake': float(r['stake']),
             'exposure_pct': float(r['stake']) / settings.bankroll_usdc if settings.bankroll_usdc else 0,
-            'unrealized_pnl': float(r['upnl']),
-            'closed_positions': closed_count,
-            'realized_pnl': float(x['pnl']),
-            'total_pnl': total_pnl,
-            'equity': equity,
+            'unrealized_pnl': float(r['upnl']), 'closed_positions': closed_count,
+            'realized_pnl': float(x['pnl']), 'total_pnl': total_pnl,
+            'equity': settings.bankroll_usdc + total_pnl,
             'return_pct': total_pnl / settings.bankroll_usdc if settings.bankroll_usdc else 0,
-            'wins': int(x['wins']),
-            'losses': int(x['losses']),
+            'wins': int(x['wins']), 'losses': int(x['losses']),
             'win_rate': int(x['wins']) / closed_count if closed_count else 0,
+            'profit_factor': float(x['gross_profit']) / gross_loss if gross_loss else (float('inf') if float(x['gross_profit']) > 0 else 0),
         }
+
+
+def category_exposure():
+    with connect() as c:
+        return [dict(r) for r in c.execute("SELECT COALESCE(category,'other') category,COUNT(*) positions,SUM(stake_usdc) stake FROM positions WHERE status='OPEN' GROUP BY category ORDER BY stake DESC")]
 
 
 def recent_analyses(limit=50):
@@ -185,8 +272,8 @@ def recent_cycles(limit=20):
 
 
 def latest_cycle():
-    cycles = recent_cycles(1)
-    return cycles[0] if cycles else None
+    rows = recent_cycles(1)
+    return rows[0] if rows else None
 
 
 def start_cycle():
