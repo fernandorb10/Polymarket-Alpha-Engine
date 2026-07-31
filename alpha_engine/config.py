@@ -1,11 +1,20 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    ai_provider: str = "openai"
+    ai_enabled: bool = True
+
     openai_api_key: str | None = None
     openai_model: str = "gpt-5-mini"
-    ai_enabled: bool = True
+
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
     database_path: str = "./data/alpha_engine.db"
     report_dir: str = "./reports"
     log_level: str = "INFO"
@@ -35,5 +44,6 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
         Path(self.report_dir).mkdir(parents=True, exist_ok=True)
+
 
 settings = Settings()
