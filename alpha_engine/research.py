@@ -1,37 +1,91 @@
-import json, logging
-from openai import OpenAI
-from .config import settings
-from .models import Market, ProbabilityReport, CriticReport
-log=logging.getLogger(__name__)
+import logging
 
-PROB_SCHEMA={"type":"object","properties":{"probability_yes":{"type":"number","minimum":0,"maximum":1},"confidence":{"type":"number","minimum":0,"maximum":1},"thesis":{"type":"string"},"evidence":{"type":"array","items":{"type":"string"}},"counterarguments":{"type":"array","items":{"type":"string"}},"unknowns":{"type":"array","items":{"type":"string"}},"source_urls":{"type":"array","items":{"type":"string"}}},"required":["probability_yes","confidence","thesis","evidence","counterarguments","unknowns","source_urls"],"additionalProperties":False}
-CRITIC_SCHEMA={"type":"object","properties":{"risk_score":{"type":"number","minimum":0,"maximum":1},"resolution_ambiguity":{"type":"number","minimum":0,"maximum":1},"strongest_objection":{"type":"string"},"failure_modes":{"type":"array","items":{"type":"string"}},"recommendation":{"type":"string","enum":["ACCEPT","REDUCE","REJECT"]}},"required":["risk_score","resolution_ambiguity","strongest_objection","failure_modes","recommendation"],"additionalProperties":False}
+from openai import OpenAI
+
+from .config import settings
+from .models import CriticReport, Market, ProbabilityReport
+
+log = logging.getLogger(__name__)
+
 
 def fallback(m: Market):
-    p=ProbabilityReport(probability_yes=m.yes_price,confidence=.15,thesis="No AI research configured",unknowns=["No independent evidence"])
-    c=CriticReport(risk_score=.9,resolution_ambiguity=.5,strongest_objection="No independent research",failure_modes=["Market-price anchoring"],recommendation="REJECT")
-    return p,c
+    p = ProbabilityReport(
+        probability_yes=m.yes_price,
+        confidence=0.15,
+        thesis="No AI research configured",
+        unknowns=["No independent evidence"],
+    )
+    c = CriticReport(
+        risk_score=0.9,
+        resolution_ambiguity=0.5,
+        strongest_objection="No independent research",
+        failure_modes=["Market-price anchoring"],
+        recommendation="REJECT",
+    )
+    return p, c
 
-def _structured(client, prompt, name, schema, web=False):
-    kwargs={"model":settings.openai_model,"input":prompt,"text":{"format":{"type":"json_schema","name":name,"strict":True,"schema":schema}}}
-    if web: kwargs["tools"]=[{"type":"web_search"}]
-    response=client.responses.create(**kwargs)
-    return json.loads(response.output_text)
+
+def _client_and_model():
+    provider = settings.ai_provider.strip().lower()
+    if provider == "gemini":
+        if not settings.gemini_api_key:
+            return None, None
+        return (
+            OpenAI(
+                api_key=settings.gemini_api_key,
+                base_url=settings.gemini_base_url,
+            ),
+            settings.gemini_model,
+        )
+    if provider == "openai":
+        if not settings.openai_api_key:
+            return None, None
+        return OpenAI(api_key=settings.openai_api_key), settings.openai_model
+    raise ValueError(f"Unsupported AI_PROVIDER: {settings.ai_provider}")
+
+
+def _structured(client, model, prompt, response_model):
+    completion = client.beta.chat.completions.parse(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": "Return only the requested structured forecast. Be calibrated and conservative.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        response_format=response_model,
+    )
+    parsed = completion.choices[0].message.parsed
+    if parsed is None:
+        raise ValueError("AI provider returned no structured result")
+    return parsed
+
 
 def research_market(m: Market):
-    if not settings.ai_enabled or not settings.openai_api_key: return fallback(m)
-    client=OpenAI(api_key=settings.openai_api_key)
-    prompt=f"""You are an evidence-first prediction-market analyst. Research current, verifiable information and estimate the probability that YES resolves true. Do not anchor on the market price. Distinguish event probability from resolution-rule risk.
+    if not settings.ai_enabled:
+        return fallback(m)
+
+    client, model = _client_and_model()
+    if client is None or model is None:
+        return fallback(m)
+
+    prompt = f"""You are an evidence-first prediction-market analyst. Estimate the probability that YES resolves true. Do not anchor on the market price. Distinguish event probability from resolution-rule risk.
+
 QUESTION: {m.question}
 RULES: {m.rules}
 END: {m.end_date}
 CATEGORY: {m.category}
-Return calibrated probabilities; lower confidence when evidence is weak, stale, conflicting, or the resolution wording is ambiguous."""
-    p=ProbabilityReport.model_validate(_structured(client,prompt,"probability_report",PROB_SCHEMA,True))
-    critic_prompt=f"""Act as an independent adversarial reviewer. Try to falsify this forecast and inspect resolution ambiguity.
+
+Use only information you can support from your knowledge. Explicitly list unknowns and lower confidence when information may be stale, conflicting, speculative, or when the resolution wording is ambiguous."""
+    p = _structured(client, model, prompt, ProbabilityReport)
+
+    critic_prompt = f"""Act as an independent adversarial reviewer. Try to falsify this forecast and inspect resolution ambiguity.
+
 MARKET: {m.question}
 RULES: {m.rules}
 FORECAST: {p.model_dump_json()}
+
 Assign risk_score based on the chance the thesis is wrong or untradeable. REJECT when the argument depends on speculation, stale evidence, unclear rules, or fragile assumptions."""
-    c=CriticReport.model_validate(_structured(client,critic_prompt,"critic_report",CRITIC_SCHEMA,False))
-    return p,c
+    c = _structured(client, model, critic_prompt, CriticReport)
+    return p, c
