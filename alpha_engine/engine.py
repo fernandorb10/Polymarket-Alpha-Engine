@@ -3,7 +3,7 @@ from .polymarket import PolymarketClient
 from .strategy import eligible, rank_market, build_opportunity
 from .research import research_market
 from .alerts import notify
-from . import db
+from . import analytics, db
 from .config import settings
 
 log = logging.getLogger(__name__)
@@ -32,6 +32,7 @@ def _select_markets_for_analysis(ranked, limit):
 
 def run_cycle(scan_only=False):
     db.init_db()
+    analytics.init_analytics()
     cid = db.start_cycle()
     client = PolymarketClient()
     seen = analysed = opened = 0
@@ -74,11 +75,17 @@ def run_cycle(scan_only=False):
                     notify(f"EL ROJILLA BOT opened {opportunity.side}\nStake: ${opportunity.stake_usdc:.2f}\nEdge: {opportunity.net_edge:.1%}\n{opportunity.market.question}")
 
         db.finish_cycle(cid, seen, len(ranked), analysed, opened)
+        metrics = analytics.record_equity()
         return {'seen': seen, 'eligible': len(ranked), 'analysed': analysed, 'opened': opened,
                 'opened_details': opened_details, 'closed': len(closed), 'closed_details': closed,
+                'equity': metrics['equity'], 'total_pnl': metrics['total_pnl'],
                 'top': ranked[:20], 'opportunities': opportunities}
     except Exception as exc:
         db.finish_cycle(cid, seen, 0, analysed, opened, str(exc))
+        try:
+            analytics.record_equity()
+        except Exception:
+            log.exception('failed to record equity after cycle error')
         notify(f"EL ROJILLA BOT cycle error\n{type(exc).__name__}: {exc}")
         raise
     finally:
