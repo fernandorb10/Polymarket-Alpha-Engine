@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     max_total_exposure_pct: float = 0.35
     slippage_buffer: float = 0.01
     max_ai_calls_per_cycle: int = 12
+
+    take_profit_pct: float = 0.15
+    stop_loss_pct: float = 0.10
+    exit_min_edge: float = 0.02
+    exit_hours_to_resolution: float = 24
+
     dashboard_host: str = "0.0.0.0"
     dashboard_port: int = 8080
 
