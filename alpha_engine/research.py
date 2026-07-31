@@ -1,56 +1,37 @@
-import json
+import json, logging
 from openai import OpenAI
 from .config import settings
-from .models import Market, ResearchReport
+from .models import Market, ProbabilityReport, CriticReport
+log=logging.getLogger(__name__)
 
+PROB_SCHEMA={"type":"object","properties":{"probability_yes":{"type":"number","minimum":0,"maximum":1},"confidence":{"type":"number","minimum":0,"maximum":1},"thesis":{"type":"string"},"evidence":{"type":"array","items":{"type":"string"}},"counterarguments":{"type":"array","items":{"type":"string"}},"unknowns":{"type":"array","items":{"type":"string"}},"source_urls":{"type":"array","items":{"type":"string"}}},"required":["probability_yes","confidence","thesis","evidence","counterarguments","unknowns","source_urls"],"additionalProperties":False}
+CRITIC_SCHEMA={"type":"object","properties":{"risk_score":{"type":"number","minimum":0,"maximum":1},"resolution_ambiguity":{"type":"number","minimum":0,"maximum":1},"strongest_objection":{"type":"string"},"failure_modes":{"type":"array","items":{"type":"string"}},"recommendation":{"type":"string","enum":["ACCEPT","REDUCE","REJECT"]}},"required":["risk_score","resolution_ambiguity","strongest_objection","failure_modes","recommendation"],"additionalProperties":False}
 
-SCHEMA = {
-  "type": "object",
-  "properties": {
-    "probability_yes": {"type": "number", "minimum": 0, "maximum": 1},
-    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-    "thesis": {"type": "string"},
-    "counter_thesis": {"type": "string"},
-    "catalysts": {"type": "array", "items": {"type": "string"}},
-    "risks": {"type": "array", "items": {"type": "string"}},
-    "source_urls": {"type": "array", "items": {"type": "string"}},
-    "freshness_hours": {"type": ["number", "null"]}
-  },
-  "required": ["probability_yes","confidence","thesis","counter_thesis","catalysts","risks","source_urls","freshness_hours"],
-  "additionalProperties": False
-}
+def fallback(m: Market):
+    p=ProbabilityReport(probability_yes=m.yes_price,confidence=.15,thesis="No AI research configured",unknowns=["No independent evidence"])
+    c=CriticReport(risk_score=.9,resolution_ambiguity=.5,strongest_objection="No independent research",failure_modes=["Market-price anchoring"],recommendation="REJECT")
+    return p,c
 
+def _structured(client, prompt, name, schema, web=False):
+    kwargs={"model":settings.openai_model,"input":prompt,"text":{"format":{"type":"json_schema","name":name,"strict":True,"schema":schema}}}
+    if web: kwargs["tools"]=[{"type":"web_search"}]
+    response=client.responses.create(**kwargs)
+    return json.loads(response.output_text)
 
-def heuristic_report(m: Market) -> ResearchReport:
-    # Neutral fallback: intentionally conservative; useful for plumbing tests, not alpha.
-    p = min(0.95, max(0.05, m.yes_price))
-    return ResearchReport(
-        probability_yes=p, confidence=0.20,
-        thesis="Fallback cuantitativo sin investigación externa.",
-        counter_thesis="No existe una ventaja informativa demostrada.",
-        risks=["OPENAI_API_KEY no configurada o IA desactivada"],
-    )
-
-
-def research_market(m: Market) -> ResearchReport:
-    if not settings.ai_enabled or not settings.openai_api_key:
-        return heuristic_report(m)
-    client = OpenAI(api_key=settings.openai_api_key)
-    prompt = f"""
-Actúa como analista escéptico de mercados predictivos. Investiga con fuentes web actuales.
-Mercado: {m.question}
-Reglas/descripción: {m.rules}
-Precio YES: {m.yes_price:.4f}; precio NO: {m.no_price:.4f}
-Fecha de cierre: {m.end_date}
-
-Estima P(YES) usando solo información verificable disponible ahora. Evita anclarte al precio.
-Incluye tesis, mejor argumento contrario, catalizadores, riesgos y URLs de fuentes.
-Si la pregunta o resolución es ambigua, reduce confidence drásticamente.
-"""
-    response = client.responses.create(
-        model=settings.openai_model,
-        tools=[{"type": "web_search"}],
-        input=prompt,
-        text={"format": {"type": "json_schema", "name": "market_research", "strict": True, "schema": SCHEMA}},
-    )
-    return ResearchReport.model_validate(json.loads(response.output_text))
+def research_market(m: Market):
+    if not settings.ai_enabled or not settings.openai_api_key: return fallback(m)
+    client=OpenAI(api_key=settings.openai_api_key)
+    prompt=f"""You are an evidence-first prediction-market analyst. Research current, verifiable information and estimate the probability that YES resolves true. Do not anchor on the market price. Distinguish event probability from resolution-rule risk.
+QUESTION: {m.question}
+RULES: {m.rules}
+END: {m.end_date}
+CATEGORY: {m.category}
+Return calibrated probabilities; lower confidence when evidence is weak, stale, conflicting, or the resolution wording is ambiguous."""
+    p=ProbabilityReport.model_validate(_structured(client,prompt,"probability_report",PROB_SCHEMA,True))
+    critic_prompt=f"""Act as an independent adversarial reviewer. Try to falsify this forecast and inspect resolution ambiguity.
+MARKET: {m.question}
+RULES: {m.rules}
+FORECAST: {p.model_dump_json()}
+Assign risk_score based on the chance the thesis is wrong or untradeable. REJECT when the argument depends on speculation, stale evidence, unclear rules, or fragile assumptions."""
+    c=CriticReport.model_validate(_structured(client,critic_prompt,"critic_report",CRITIC_SCHEMA,False))
+    return p,c

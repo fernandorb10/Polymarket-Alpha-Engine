@@ -1,63 +1,64 @@
 # Polymarket Alpha Engine
 
-MVP completo para descubrir mercados líquidos, investigarlos con IA y noticias actuales, estimar probabilidad justa, calcular valor esperado neto de fricción y abrir **solo operaciones simuladas**.
+Market discovery, CLOB order-book enrichment, AI-assisted probability estimation, adversarial review, Kelly-based sizing, persistent paper trading, and a lightweight dashboard.
 
-## Qué incluye
+## Safety and scope
 
-- Descubrimiento de mercados mediante Gamma API.
-- Filtros por liquidez, volumen, spread y precio.
-- Investigación con OpenAI Responses API + búsqueda web.
-- Estimación estructurada de probabilidad, confianza, tesis y contra-tesis.
-- Ranking por edge, confianza y liquidez.
-- Tamaño de posición con cuarto de Kelly y límites duros.
-- SQLite con snapshots, análisis y posiciones paper.
-- Prevención de posiciones duplicadas.
-- CLI, scripts de instalación/ejecución, tests y CI.
+This release is **paper trading only**. It does not accept wallet private keys and does not place real orders. Forecasts can be wrong; profitability is not guaranteed.
 
-## Instalación en Ubuntu
+## Ubuntu installation
 
 ```bash
-sudo apt update && sudo apt install -y python3 python3-venv git
+sudo apt update
+sudo apt install -y git python3 python3-venv
+cd ~/polymarket-alpha-engine
+chmod +x scripts/*.sh
 ./scripts/bootstrap.sh
 nano .env
 ```
 
-Añade `OPENAI_API_KEY` en `.env`. Sin clave funciona en modo conservador para validar la tubería, pero no generará señales reales porque la estimación coincide con el mercado.
+Set `OPENAI_API_KEY`. Keep `AI_ENABLED=false` for scanner-only operation.
 
-## Simular
-
-```bash
-./scripts/simulate.sh
-```
-
-Escaneo sin abrir operaciones paper:
+## Commands
 
 ```bash
-./scripts/scan_only.sh
+.venv/bin/alpha-engine init
+.venv/bin/alpha-engine cycle --scan-only
+.venv/bin/alpha-engine cycle
+.venv/bin/alpha-engine status
+.venv/bin/alpha-engine positions --open-only
+.venv/bin/alpha-engine serve
+pytest -q
 ```
 
-Estado:
+Dashboard: `http://SERVER_IP:8080` (restrict access with a firewall or reverse proxy).
+
+## Scheduled operation
 
 ```bash
-source .venv/bin/activate
-alpha-engine status
+sudo ./scripts/install_systemd.sh
+systemctl list-timers | grep polymarket
+journalctl -u polymarket-alpha.service -f
+journalctl -u polymarket-dashboard.service -f
 ```
 
-## Automatización cada 15 minutos
+## Pipeline
 
-```bash
-crontab -e
-*/15 * * * * cd /ruta/polymarket-alpha-engine && ./scripts/simulate.sh >> data/engine.log 2>&1
-```
+1. Gamma API discovers active markets.
+2. CLOB `/books` supplies executable bid/ask and spread data.
+3. Hard filters remove illiquid, wide-spread, extreme-price and near-expiry markets.
+4. Ranking limits expensive AI calls to the strongest candidates.
+5. OpenAI web research returns a structured probability report.
+6. An independent critic checks ambiguity and failure modes.
+7. Net edge includes half-spread and a slippage buffer.
+8. Fractional Kelly plus portfolio caps determines paper stake.
+9. SQLite stores snapshots, analyses, cycles and positions.
+10. Each cycle marks open positions to current prices.
 
-## Seguridad
+## Important next milestones
 
-Este repositorio no contiene claves privadas ni ejecución real de órdenes. No conectes fondos hasta disponer de una muestra amplia de predicciones resueltas, calibración, costes reales y límites de pérdida.
-
-## Próxima fase necesaria para validar rentabilidad
-
-La primera versión captura oportunidades futuras. Para evaluar ventaja real hay que:
-1. mantenerla ejecutándose durante semanas;
-2. cerrar posiciones cuando el mercado resuelva;
-3. medir Brier score, calibración, ROI, drawdown y resultados por categoría;
-4. comparar contra el precio de mercado como benchmark.
+- Automated resolution/settlement accounting.
+- Brier score and calibration dashboards by category.
+- Historical replay dataset and walk-forward testing.
+- News-event change detection rather than repeated full research.
+- PostgreSQL/Redis only when SQLite becomes a real bottleneck.
