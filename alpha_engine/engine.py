@@ -17,6 +17,7 @@ def _select_markets_for_analysis(ranked, limit):
         limit,
         db.open_market_ids(),
         db.recently_analyzed_market_ids(settings.analysis_cooldown_minutes),
+        db.recently_analyzed_market_ids(settings.diversity_cooldown_minutes),
     )
 
 
