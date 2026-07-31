@@ -77,12 +77,14 @@ def select_balanced(
     open_ids: set[str],
     recent_ids: set[str],
     diversity_recent_ids: set[str] | None = None,
+    pending_confirmation_ids: set[str] | None = None,
 ):
-    """Select open positions, reserve category coverage, then fill globally."""
+    """Select open positions, pending confirmations, category coverage, then global rank."""
     selected = []
     selected_ids: set[str] = set()
     selected_category_counts: Counter[str] = Counter()
     diversity_recent_ids = diversity_recent_ids or set()
+    pending_confirmation_ids = pending_confirmation_ids or set()
 
     def add(market) -> bool:
         market_id = str(market.id)
@@ -93,8 +95,18 @@ def select_balanced(
         selected_category_counts[market_category(market)] += 1
         return True
 
+    # Open positions must always be re-evaluated for exit management.
     for market in ranked:
         if str(market.id) in open_ids:
+            add(market)
+            if len(selected) >= limit:
+                return selected
+
+    # A 2-cycle confirmation is only useful if pending candidates are revisited promptly.
+    # Pending confirmations bypass ordinary analysis cooldown, but remain limited by the
+    # overall per-cycle AI budget and current eligibility/ranking.
+    for market in ranked:
+        if str(market.id) in pending_confirmation_ids:
             add(market)
             if len(selected) >= limit:
                 return selected
