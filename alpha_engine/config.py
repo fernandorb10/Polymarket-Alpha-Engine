@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     gemini_model: str = 'gemini-3.5-flash-lite'
     gemini_base_url: str = 'https://generativelanguage.googleapis.com/v1beta/openai/'
     web_research_enabled: bool = True
+    require_web_evidence: bool = True
     web_research_max_items: int = Field(default=6, ge=1, le=20)
     web_research_timeout: float = Field(default=10, gt=0)
 
@@ -42,6 +43,7 @@ class Settings(BaseSettings):
     min_price: float = Field(default=0.05, ge=0, le=1)
     max_price: float = Field(default=0.95, ge=0, le=1)
     min_hours_to_close: float = 6
+    max_hours_to_close: float = Field(default=720, gt=0)
     min_net_edge: float = Field(default=0.06, ge=0, le=1)
     min_confidence: float = Field(default=0.55, ge=0, le=1)
     max_critic_risk: float = Field(default=0.65, ge=0, le=1)
@@ -101,6 +103,8 @@ class Settings(BaseSettings):
     def validate_limits(self):
         if self.min_price >= self.max_price:
             raise ValueError('MIN_PRICE must be lower than MAX_PRICE')
+        if self.min_hours_to_close >= self.max_hours_to_close:
+            raise ValueError('MIN_HOURS_TO_CLOSE must be lower than MAX_HOURS_TO_CLOSE')
         if self.max_position_pct > self.max_total_exposure_pct:
             raise ValueError('MAX_POSITION_PCT cannot exceed MAX_TOTAL_EXPOSURE_PCT')
         if self.max_event_exposure_pct > self.max_category_exposure_pct:
