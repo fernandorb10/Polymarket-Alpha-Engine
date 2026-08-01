@@ -9,19 +9,19 @@ from .models import CriticReport, Market, ProbabilityReport
 log = logging.getLogger(__name__)
 
 
-def fallback(market: Market):
+def fallback(market: Market, reason: str = "Current evidence unavailable"):
     return (
         ProbabilityReport(
             probability_yes=market.yes_price,
-            confidence=0.15,
-            thesis="No independent current evidence",
-            unknowns=["Current evidence unavailable"],
+            confidence=0.0,
+            thesis="No trade: independent current evidence is unavailable",
+            unknowns=[reason],
         ),
         CriticReport(
-            risk_score=0.9,
+            risk_score=1.0,
             resolution_ambiguity=0.5,
-            strongest_objection="No current independent research",
-            failure_modes=["Market-price anchoring"],
+            strongest_objection=reason,
+            failure_modes=["No auditable current evidence"],
             recommendation="REJECT",
         ),
     )
@@ -69,7 +69,6 @@ def _structured(client, model, prompt, response_model):
 
 
 def _attach_evidence(probability: ProbabilityReport, items: list[dict[str, str]]) -> None:
-    """Persist exactly what was retrieved in the structured analysis payload."""
     urls = [item["url"] for item in items if item.get("url")]
     probability.source_urls = list(dict.fromkeys([*probability.source_urls, *urls]))
 
@@ -89,13 +88,16 @@ def _attach_evidence(probability: ProbabilityReport, items: list[dict[str, str]]
 
 def research_market(market: Market):
     if not settings.ai_enabled:
-        return fallback(market)
+        return fallback(market, "AI research is disabled")
+
+    evidence = current_evidence(market.question)
+    if settings.require_web_evidence and not evidence:
+        return fallback(market, "No current web evidence was retrieved")
 
     client, model = _client_and_model()
     if client is None or model is None:
-        return fallback(market)
+        return fallback(market, "AI provider is not configured")
 
-    evidence = current_evidence(market.question)
     evidence_text = format_evidence(evidence)
     prompt = f"""You are an evidence-first prediction-market analyst. Estimate the probability that YES resolves true. Do not anchor on the market price. Distinguish event probability from resolution-rule risk.
 
