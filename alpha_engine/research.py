@@ -9,19 +9,19 @@ from .models import CriticReport, Market, ProbabilityReport
 log = logging.getLogger(__name__)
 
 
-def fallback(market: Market, reason: str = "Current evidence unavailable"):
+def fallback(market: Market, reason: str = "No independent current evidence"):
     return (
         ProbabilityReport(
             probability_yes=market.yes_price,
             confidence=0.0,
-            thesis="No trade: independent current evidence is unavailable",
+            thesis=reason,
             unknowns=[reason],
         ),
         CriticReport(
             risk_score=1.0,
             resolution_ambiguity=0.5,
             strongest_objection=reason,
-            failure_modes=["No auditable current evidence"],
+            failure_modes=["Insufficient independent evidence"],
             recommendation="REJECT",
         ),
     )
@@ -68,6 +68,15 @@ def _structured(client, model, prompt, response_model):
     return parsed
 
 
+def _independent_source_count(items: list[dict[str, str]]) -> int:
+    sources = {
+        item.get("source", "").strip().lower()
+        for item in items
+        if item.get("source", "").strip()
+    }
+    return len(sources)
+
+
 def _attach_evidence(probability: ProbabilityReport, items: list[dict[str, str]]) -> None:
     urls = [item["url"] for item in items if item.get("url")]
     probability.source_urls = list(dict.fromkeys([*probability.source_urls, *urls]))
@@ -76,27 +85,36 @@ def _attach_evidence(probability: ProbabilityReport, items: list[dict[str, str]]
         f"WEB: {item['title']} | {item['source']} | {item['published']}"
         for item in items
     ]
-    probability.evidence = list(dict.fromkeys([*probability.evidence, *retrieved]))
+    probability.evidence = list(
+        dict.fromkeys([*probability.evidence, *retrieved])
+    )
 
     if items:
         query = items[0].get("query")
         if query:
             probability.unknowns = list(
-                dict.fromkeys([*probability.unknowns, f"News query used: {query}"])
+                dict.fromkeys(
+                    [*probability.unknowns, f"News query used: {query}"]
+                )
             )
 
 
 def research_market(market: Market):
     if not settings.ai_enabled:
-        return fallback(market, "AI research is disabled")
+        return fallback(market, "AI disabled")
 
     evidence = current_evidence(market.question)
-    if settings.require_web_evidence and not evidence:
-        return fallback(market, "No current web evidence was retrieved")
+    source_count = _independent_source_count(evidence)
+    if settings.require_web_evidence and source_count < settings.min_evidence_sources:
+        return fallback(
+            market,
+            f"Only {source_count} independent current evidence sources; "
+            f"minimum is {settings.min_evidence_sources}",
+        )
 
     client, model = _client_and_model()
     if client is None or model is None:
-        return fallback(market, "AI provider is not configured")
+        return fallback(market, "AI provider unavailable")
 
     evidence_text = format_evidence(evidence)
     prompt = f"""You are an evidence-first prediction-market analyst. Estimate the probability that YES resolves true. Do not anchor on the market price. Distinguish event probability from resolution-rule risk.
