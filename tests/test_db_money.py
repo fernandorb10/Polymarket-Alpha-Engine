@@ -106,6 +106,11 @@ def test_total_exposure_is_hard_limit(monkeypatch, tmp_path):
 
 def test_open_position_clips_stake_to_remaining_room(monkeypatch, tmp_path):
     setup_tmp(monkeypatch, tmp_path)
+    # This test opens two positions that share the same canned question text
+    # (and therefore the same event_key), so the unrelated related-position
+    # cap must be raised out of the way to isolate the exposure-clipping
+    # behaviour under test.
+    monkeypatch.setattr(settings, "max_related_positions", 2)
     assert db.open_position(opportunity("m1", stake=45))
 
     second = opportunity("m2", stake=20)
@@ -181,6 +186,7 @@ def test_manage_exits_ignores_confidence_noise_when_edge_and_risk_are_fine(
     monkeypatch, tmp_path
 ):
     setup_tmp(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "edge_exit_enabled", True)
     flat = flat_market()
     assert db.open_position(scripted_opportunity(flat))
 
@@ -205,11 +211,12 @@ def test_manage_exits_closes_position_when_edge_actually_collapses(
     monkeypatch, tmp_path
 ):
     setup_tmp(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "edge_exit_enabled", True)
     flat = flat_market()
     assert db.open_position(scripted_opportunity(flat))
 
     gone = scripted_opportunity(
-        flat, net_edge=0.01, confidence=0.8, critic_risk=0.1, decision="REJECT"
+        flat, net_edge=-0.05, confidence=0.8, critic_risk=0.1, decision="REJECT"
     )
     closed = []
     for _ in range(settings.exit_confirmation_cycles):
@@ -219,8 +226,29 @@ def test_manage_exits_closes_position_when_edge_actually_collapses(
     assert closed[0]["reason"] == "EDGE_GONE_CONFIRMED"
 
 
+def test_manage_exits_respects_edge_exit_enabled_kill_switch(monkeypatch, tmp_path):
+    setup_tmp(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "edge_exit_enabled", False)
+    flat = flat_market()
+    assert db.open_position(scripted_opportunity(flat))
+
+    gone = scripted_opportunity(
+        flat, net_edge=-0.5, confidence=0.1, critic_risk=0.9, decision="REJECT"
+    )
+    for _ in range(settings.exit_confirmation_cycles + 2):
+        closed = db.manage_exits([flat], [gone])
+        assert closed == []
+
+    with db.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM positions WHERE id=1"
+        ).fetchone()["status"]
+    assert status == "OPEN"
+
+
 def test_manage_exits_closes_position_when_critic_flags_risk(monkeypatch, tmp_path):
     setup_tmp(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "edge_exit_enabled", True)
     flat = flat_market()
     assert db.open_position(scripted_opportunity(flat))
 

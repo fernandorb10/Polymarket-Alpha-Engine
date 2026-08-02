@@ -666,11 +666,15 @@ def manage_exits(markets, opportunities) -> list[dict]:
                         reason = "NEAR_RESOLUTION"
 
             opportunity = opportunity_by_id.get(str(position["market_id"]))
-            edge_bad = opportunity is not None and (
-                opportunity.side != position["side"]
-                or opportunity.net_edge < settings.exit_min_edge
-                or opportunity.critic_risk > settings.max_critic_risk
-                or opportunity.critic_report.recommendation == "REJECT"
+            edge_bad = (
+                settings.edge_exit_enabled
+                and opportunity is not None
+                and (
+                    opportunity.side != position["side"]
+                    or opportunity.net_edge < settings.exit_min_edge
+                    or opportunity.critic_risk > settings.max_critic_risk
+                    or opportunity.critic_report.recommendation == "REJECT"
+                )
             )
             count = int(position.get("edge_gone_count") or 0)
             if edge_bad:
