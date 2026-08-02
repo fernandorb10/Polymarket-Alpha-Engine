@@ -669,7 +669,8 @@ def manage_exits(markets, opportunities) -> list[dict]:
             edge_bad = opportunity is not None and (
                 opportunity.side != position["side"]
                 or opportunity.net_edge < settings.exit_min_edge
-                or opportunity.decision == "REJECT"
+                or opportunity.critic_risk > settings.max_critic_risk
+                or opportunity.critic_report.recommendation == "REJECT"
             )
             count = int(position.get("edge_gone_count") or 0)
             if edge_bad:
