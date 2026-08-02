@@ -34,7 +34,10 @@ def rank_market(market: Market) -> float:
     liquidity = min(1, math.log10(max(market.liquidity, 1)) / 6)
     volume = min(1, math.log10(max(market.volume, 1)) / 7)
     activity = min(1, math.log10(max(market.volume_24h, 1)) / 5)
-    spread = max(0, 1 - market.spread / max(settings.max_spread, 0.001))
+    spread_score = max(
+        0,
+        1 - market.spread / max(settings.max_spread, 0.001),
+    )
 
     remaining = hours_left(market)
     if math.isinf(remaining):
@@ -49,8 +52,8 @@ def rank_market(market: Market) -> float:
         0.30 * liquidity
         + 0.25 * volume
         + 0.20 * activity
-        + 0.15 * spread
-        + 0.10 * horizon
+        + 0.20 * spread_score
+        + 0.05 * horizon
     )
     return market.rank_score
 
@@ -60,6 +63,19 @@ def kelly_binary(probability: float, price: float) -> float:
         return 0
     odds = (1 - price) / price
     return max(0, (odds * probability - (1 - probability)) / odds)
+
+
+def required_edge(market: Market) -> float:
+    """Demand an edge comfortably larger than observable trading friction."""
+    estimated_round_trip_cost = (
+        market.spread
+        + 2 * settings.slippage_buffer
+        + 2 * settings.paper_fee_pct
+    )
+    return max(
+        settings.min_net_edge,
+        estimated_round_trip_cost * settings.min_edge_cost_multiple,
+    )
 
 
 def build_opportunity(
@@ -77,6 +93,8 @@ def build_opportunity(
     executable_price = executable_entry_price(market, side)
     gross_edge = fair - executable_price
     net_edge = gross_edge - settings.slippage_buffer
+    threshold = required_edge(market)
+
     kelly = kelly_binary(fair, executable_price) * settings.kelly_fraction
     max_stake = settings.bankroll_usdc * settings.max_position_pct
     exposure_room = max(
@@ -95,25 +113,34 @@ def build_opportunity(
         else -1
     )
 
+    evidence_sources = len(set(probability.source_urls))
     decision = "OPEN"
-    reason = "edge and risk thresholds passed"
-    if (
-        net_edge < settings.min_net_edge
-        or probability.confidence < settings.min_confidence
-        or critic.risk_score > settings.max_critic_risk
-        or critic.recommendation == "REJECT"
-        or stake < 1
-    ):
+    reason = "V6 cost-aware thresholds passed"
+
+    if evidence_sources < settings.min_evidence_sources:
         decision = "REJECT"
-        reason = "threshold or portfolio constraint failed"
-    elif critic.recommendation == "REDUCE":
-        stake *= 0.5
-        decision = "WATCH"
-        reason = "critic requested reduced conviction"
+        reason = "insufficient independent evidence"
+    elif net_edge < threshold:
+        decision = "REJECT"
+        reason = (
+            f"net edge {net_edge:.3f} below cost-aware threshold {threshold:.3f}"
+        )
+    elif probability.confidence < settings.min_confidence:
+        decision = "REJECT"
+        reason = "forecast confidence below V6 threshold"
+    elif critic.risk_score > settings.max_critic_risk:
+        decision = "REJECT"
+        reason = "critic risk above V6 threshold"
+    elif critic.recommendation != "ACCEPT":
+        decision = "REJECT"
+        reason = f"critic recommendation {critic.recommendation}"
+    elif stake < 1:
+        decision = "REJECT"
+        reason = "insufficient portfolio room"
 
     score = (
         100
-        * max(0, net_edge)
+        * max(0, net_edge - threshold)
         * probability.confidence
         * (1 - critic.risk_score)
     )
