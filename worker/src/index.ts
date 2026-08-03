@@ -4,27 +4,26 @@ import * as db from "./db";
 import { runCycle } from "./engine";
 import type { Env } from "./types";
 
-const SELF_URL = "https://el-rojilla-bot.frodriguezbraojos.workers.dev";
-
 export default {
-  // Cron-triggered `scheduled()` invocations on this plan get killed before
-  // ctx.waitUntil(runCycle(...)) finishes - every cycle since deploy stayed
-  // stuck at started_at with no finished_at or error, while the exact same
-  // runCycle() reliably completes in 1-8s when invoked through fetch() (e.g.
-  // manual /run calls all finished fine). So scheduled() no longer runs the
-  // cycle itself - it just fires a self-request at /run, which executes in a
-  // normal fetch-triggered context that has proven to complete reliably.
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  // Cron-triggered `scheduled()` invocations on this plan kill background
+  // ctx.waitUntil() work before it finishes - every cycle since deploy stayed
+  // stuck at started_at with no finished_at or error, and even a follow-up fix
+  // that queued a self-fetch to /run via ctx.waitUntil never got far enough to
+  // log success OR failure. ctx.waitUntil() itself is fine for fetch-triggered
+  // invocations (manual POST /run calls, which use the same pattern, reliably
+  // completed in 1-8s every time) - it's specifically background work queued
+  // from a *scheduled* invocation that gets cut short. So scheduled() now
+  // awaits runCycle() directly, with no ctx.waitUntil involved: the platform
+  // has to keep the invocation alive until the handler's own returned promise
+  // settles, which is a stronger guarantee than "keep it alive for whatever
+  // side promise got queued."
+  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     const settings = loadSettings(env);
-    const headers: Record<string, string> = {};
-    if (settings.dashboardUsername && settings.dashboardPassword) {
-      headers.Authorization = `Basic ${btoa(`${settings.dashboardUsername}:${settings.dashboardPassword}`)}`;
+    try {
+      await runCycle(env, settings);
+    } catch (err) {
+      console.error("run_cycle failed", err);
     }
-    ctx.waitUntil(
-      fetch(`${SELF_URL}/run`, { method: "POST", headers }).catch((err) => {
-        console.error("failed to trigger cycle via self-fetch", err);
-      }),
-    );
   },
 
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
