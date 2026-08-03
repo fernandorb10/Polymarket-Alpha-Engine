@@ -106,6 +106,11 @@ def test_total_exposure_is_hard_limit(monkeypatch, tmp_path):
 
 def test_open_position_clips_stake_to_remaining_room(monkeypatch, tmp_path):
     setup_tmp(monkeypatch, tmp_path)
+    # This test opens two positions that share the same canned question text
+    # (and therefore the same event_key), so the unrelated related-position
+    # cap must be raised out of the way to isolate the exposure-clipping
+    # behaviour under test.
+    monkeypatch.setattr(settings, "max_related_positions", 2)
     assert db.open_position(opportunity("m1", stake=45))
 
     second = opportunity("m2", stake=20)
@@ -117,6 +122,150 @@ def test_open_position_clips_stake_to_remaining_room(monkeypatch, tmp_path):
             "SELECT SUM(stake_usdc) total FROM positions WHERE status='OPEN'"
         ).fetchone()["total"]
     assert total == 50.0
+
+
+def flat_market(mid="m1", price=0.50):
+    return Market(
+        id=mid,
+        question="Will Team win the World Cup?",
+        category="sports",
+        yes_price=price,
+        no_price=1 - price,
+        best_bid_yes=price,
+        best_ask_yes=price,
+        spread=0,
+        liquidity=100000,
+        volume=100000,
+        yes_token_id="y",
+        no_token_id="n",
+    )
+
+
+def scripted_opportunity(
+    current_market,
+    side="YES",
+    net_edge=0.15,
+    confidence=0.8,
+    critic_risk=0.1,
+    decision="OPEN",
+    recommendation="ACCEPT",
+):
+    price = db.executable_entry_price(current_market, side)
+    probability = ProbabilityReport(
+        probability_yes=0.6 if side == "YES" else 0.4,
+        confidence=confidence,
+        thesis="test",
+    )
+    critic = CriticReport(
+        risk_score=critic_risk,
+        resolution_ambiguity=0.1,
+        strongest_objection="none",
+        recommendation=recommendation,
+    )
+    return Opportunity(
+        market=current_market,
+        side=side,
+        fair_probability=0.6 if side == "YES" else 0.4,
+        market_probability=price,
+        gross_edge=net_edge + 0.01,
+        net_edge=net_edge,
+        expected_value_per_dollar=0.2,
+        confidence=confidence,
+        critic_risk=critic_risk,
+        kelly_fraction=0.02,
+        stake_usdc=20,
+        score=10,
+        decision=decision,
+        reason="test",
+        probability_report=probability,
+        critic_report=critic,
+    )
+
+
+def test_manage_exits_ignores_confidence_noise_when_edge_and_risk_are_fine(
+    monkeypatch, tmp_path
+):
+    setup_tmp(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "edge_exit_enabled", True)
+    flat = flat_market()
+    assert db.open_position(scripted_opportunity(flat))
+
+    # Confidence dipping below min_confidence flips `decision` to REJECT even
+    # though the actual edge and critic risk are still healthy - this must
+    # not be treated as the thesis having failed.
+    noisy = scripted_opportunity(
+        flat, net_edge=0.20, confidence=0.4, critic_risk=0.3, decision="REJECT"
+    )
+    for _ in range(3):
+        closed = db.manage_exits([flat], [noisy])
+        assert closed == []
+
+    with db.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM positions WHERE id=1"
+        ).fetchone()["status"]
+    assert status == "OPEN"
+
+
+def test_manage_exits_closes_position_when_edge_actually_collapses(
+    monkeypatch, tmp_path
+):
+    setup_tmp(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "edge_exit_enabled", True)
+    flat = flat_market()
+    assert db.open_position(scripted_opportunity(flat))
+
+    gone = scripted_opportunity(
+        flat, net_edge=-0.05, confidence=0.8, critic_risk=0.1, decision="REJECT"
+    )
+    closed = []
+    for _ in range(settings.exit_confirmation_cycles):
+        closed = db.manage_exits([flat], [gone])
+
+    assert len(closed) == 1
+    assert closed[0]["reason"] == "EDGE_GONE_CONFIRMED"
+
+
+def test_manage_exits_respects_edge_exit_enabled_kill_switch(monkeypatch, tmp_path):
+    setup_tmp(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "edge_exit_enabled", False)
+    flat = flat_market()
+    assert db.open_position(scripted_opportunity(flat))
+
+    gone = scripted_opportunity(
+        flat, net_edge=-0.5, confidence=0.1, critic_risk=0.9, decision="REJECT"
+    )
+    for _ in range(settings.exit_confirmation_cycles + 2):
+        closed = db.manage_exits([flat], [gone])
+        assert closed == []
+
+    with db.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM positions WHERE id=1"
+        ).fetchone()["status"]
+    assert status == "OPEN"
+
+
+def test_manage_exits_closes_position_when_critic_flags_risk(monkeypatch, tmp_path):
+    setup_tmp(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "edge_exit_enabled", True)
+    flat = flat_market()
+    assert db.open_position(scripted_opportunity(flat))
+
+    risky = scripted_opportunity(
+        flat,
+        net_edge=0.20,
+        confidence=0.8,
+        critic_risk=0.9,
+        decision="REJECT",
+        recommendation="REJECT",
+    )
+    closed = []
+    for _ in range(settings.exit_confirmation_cycles):
+        closed = db.manage_exits([flat], [risky])
+
+    assert len(closed) == 1
+    assert closed[0]["reason"] == "EDGE_GONE_CONFIRMED"
 
 
 def test_recovers_orphaned_legacy_table(monkeypatch, tmp_path):
